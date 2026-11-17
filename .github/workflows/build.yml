@@ -1,0 +1,156 @@
+name: Build Caddy
+
+# Tracks upstream Caddy releases and publishes plugin builds to Docker Hub.
+# A scheduled run resolves the latest release and skips any tag that already
+# exists, so a newer Caddy version is built within a day of its release.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: "Caddy version: 2.11.9, v2.11.9, or latest"
+        default: latest
+      variants:
+        description: "Space-separated variants: default full"
+        default: "default full"
+      push:
+        description: "Push images to Docker Hub"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "Makefile"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: oaklight/caddy
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Resolve Caddy version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.caddy_version }}
+        run: |
+          set -eu
+          V="${REQUESTED:-latest}"
+          if [ "$V" = "latest" ]; then
+            V=$(curl -fsSL https://api.github.com/repos/caddyserver/caddy/releases/latest \
+                | python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')
+          fi
+          V="${V#v}"
+          [ -n "$V" ] || { echo "::error::cannot resolve Caddy version"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Caddy $V"
+
+      - name: Build matrix
+        id: matrix
+        env:
+          VARIANTS: ${{ inputs.variants }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          defs = {
+              "default": dict(
+                  suffix="huaweicloud-cache-s3",
+                  with_huaweicloud="true", with_cloudflare="false", with_dnspod="false",
+                  with_alidns="false", with_cache="true", with_s3_storage="true",
+                  with_trojan="false"),
+              "full": dict(
+                  suffix="huaweicloud-cloudflare-dnspod-alidns-cache-s3-trojan",
+                  with_huaweicloud="true", with_cloudflare="true", with_dnspod="true",
+                  with_alidns="true", with_cache="true", with_s3_storage="true",
+                  with_trojan="true"),
+          }
+          wanted = (os.environ.get("VARIANTS") or "default full").split()
+          rows = []
+          for name in wanted:
+              if name not in defs:
+                  raise SystemExit("unknown variant: " + name)
+              for target in ("binary", "runtime"):
+                  rows.append({"name": name, "target": target, **defs[name]})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("matrix=" + json.dumps(rows) + "\n")
+          print(json.dumps(rows, indent=2))
+          PY
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    name: ${{ matrix.name }} / ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: tags
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          if [ "${{ matrix.target }}" = "runtime" ]; then
+            TAGS="$IMAGE:v${VERSION}-${{ matrix.suffix }}-alpine"
+            [ "${{ matrix.name }}" = "default" ] && TAGS="$TAGS $IMAGE:latest-alpine"
+          else
+            TAGS="$IMAGE:v${VERSION}-${{ matrix.suffix }}"
+            [ "${{ matrix.name }}" = "default" ] && TAGS="$TAGS $IMAGE:latest"
+          fi
+          FIRST="${TAGS%% *}"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "first=$FIRST" >> "$GITHUB_OUTPUT"
+          echo "tags: $TAGS"
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Skip when the tag already exists
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.tags.outputs.first }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.tags.outputs.first }} already published, skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.exists.outputs.exists == 'false'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.exists == 'false'
+
+      - name: Build and push
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ inputs.push != false }}
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            CADDY_VERSION=${{ needs.resolve.outputs.version }}
+            WITH_HUAWEICLOUD=${{ matrix.with_huaweicloud }}
+            WITH_CLOUDFLARE=${{ matrix.with_cloudflare }}
+            WITH_DNSPOD=${{ matrix.with_dnspod }}
+            WITH_ALIDNS=${{ matrix.with_alidns }}
+            WITH_CACHE=${{ matrix.with_cache }}
+            WITH_S3_STORAGE=${{ matrix.with_s3_storage }}
+            WITH_TROJAN=${{ matrix.with_trojan }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.target }}
