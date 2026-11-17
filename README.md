@@ -21,10 +21,14 @@ new Caddy version is built within a day of its release.
 
 `v{version}` is the upstream Caddy version, for example `v2.11.9`.
 
-| Variant | Plugins | Tag (binary) | Tag (runtime) |
+| Variant | Plugins | Descriptive tag | Short alias |
 | --- | --- | --- | --- |
-| `default` | huaweicloud, cache, s3-storage | `v{version}-huaweicloud-cache-s3` | `v{version}-huaweicloud-cache-s3-alpine` |
-| `full` | all seven | `v{version}-huaweicloud-cloudflare-dnspod-alidns-cache-s3-trojan` | same, `-alpine` |
+| `default` | huaweicloud, cache, s3-storage | `v{version}-huaweicloud-cache-s3` | `v{version}-default` |
+| `full` | all seven | `v{version}-huaweicloud-cloudflare-dnspod-alidns-cache-s3-trojan` | `v{version}-full` |
+
+Each tag exists twice: the binary image uses the tag as listed, the runtime
+image appends `-alpine`. The descriptive tag and the short alias point at the
+same image, so both naming schemes stay valid.
 
 The `default` variant also updates `latest` and `latest-alpine`.
 
@@ -101,6 +105,12 @@ the build files. It does this:
 2. Expands the variant list into a matrix of variant × target.
 3. Skips any tag that already exists on Docker Hub.
 4. Builds `linux/amd64` and `linux/arm64` and pushes.
+5. Verifies every variant before the run passes:
+   - `caddy version` reports the expected upstream version.
+   - `caddy list-modules --packages` contains every expected plugin.
+   - The config validates with `caddy validate`.
+   - The container serves a request on `:8080`.
+   - The runtime image runs as uid 1000.
 
 Manual run with a pinned version and no push:
 
@@ -117,6 +127,21 @@ make build                                   # default variant, latest Caddy
 make build VARIANT=full CADDY_VERSION=2.11.9
 make version                                 # print the resolved image tag
 ```
+
+## Plugin version pins
+
+`caddy-dns/dnspod` tagged releases (through `v0.0.4`) still depend on
+`libdns` v0.2 and do not compile against `libdns` v1, which Caddy 2.11
+requires. The build pins the commit that migrated to `libdns` v1 until a new
+tag is published. Override it when that changes:
+
+```bash
+docker build --build-arg DNSPOD_VERSION=v0.1.0 --build-arg WITH_DNSPOD=true .
+```
+
+Verified locally with Caddy 2.11.9: the `default` and `full` variants build,
+report the expected version, load every expected plugin, validate a config and
+serve a request.
 
 ## Optional libdns replacement
 

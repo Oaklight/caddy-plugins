@@ -15,7 +15,7 @@
 
 ARG REGISTRY_MIRROR=docker.io
 
-FROM ${REGISTRY_MIRROR}/library/golang:1.25-alpine AS builder
+FROM ${REGISTRY_MIRROR}/library/golang:1.26-alpine AS builder
 
 ARG TARGETARCH
 ARG XCADDY_VERSION=v0.4.7
@@ -29,11 +29,16 @@ ARG WITH_TROJAN=false
 ARG WITH_CACHE=false
 ARG WITH_S3_STORAGE=false
 ARG LIBDNS_HUAWEICLOUD_FORK=
+# The tagged releases of caddy-dns/dnspod still depend on libdns v0.2 and do
+# not compile against libdns v1, which Caddy 2.11 uses. Pin the commit that
+# migrated to libdns v1 until a tag exists.
+ARG DNSPOD_VERSION=fb7cc31cc04c68a304b8d2672c3e5d9f2ad3d7ba
 
 ENV GOPROXY=${GOPROXY} \
     GOOS=linux \
     GOARCH=${TARGETARCH} \
-    CGO_ENABLED=0
+    CGO_ENABLED=0 \
+    GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git ca-certificates
 
@@ -54,7 +59,7 @@ RUN set -eu; \
         PLUGINS="$PLUGINS --with github.com/caddy-dns/cloudflare"; \
     fi; \
     if [ "$WITH_DNSPOD" = "true" ]; then \
-        PLUGINS="$PLUGINS --with github.com/caddy-dns/dnspod"; \
+        PLUGINS="$PLUGINS --with github.com/caddy-dns/dnspod@$DNSPOD_VERSION"; \
     fi; \
     if [ "$WITH_ALIDNS" = "true" ]; then \
         PLUGINS="$PLUGINS --with github.com/caddy-dns/alidns"; \
@@ -68,8 +73,13 @@ RUN set -eu; \
     if [ "$WITH_TROJAN" = "true" ]; then \
         PLUGINS="$PLUGINS --with github.com/imgk/caddy-trojan"; \
     fi; \
-    echo "Caddy ${CADDY_VERSION} ${TARGETARCH}: $PLUGINS"; \
-    xcaddy build "${CADDY_VERSION}" --output /build/caddy $PLUGINS $REPLACES; \
+    case "$CADDY_VERSION" in \
+        ""|latest) TAG="latest" ;; \
+        v*) TAG="$CADDY_VERSION" ;; \
+        *) TAG="v$CADDY_VERSION" ;; \
+    esac; \
+    echo "Caddy $TAG ${TARGETARCH}: $PLUGINS"; \
+    xcaddy build "$TAG" --output /build/caddy $PLUGINS $REPLACES; \
     /build/caddy version
 
 FROM scratch AS binary

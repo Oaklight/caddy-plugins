@@ -1,8 +1,9 @@
 name: Build Caddy
 
 # Tracks upstream Caddy releases and publishes plugin builds to Docker Hub.
-# A scheduled run resolves the latest release and skips any tag that already
-# exists, so a newer Caddy version is built within a day of its release.
+# A scheduled run resolves the latest release and skips tags that already
+# exist, so a new Caddy version is built within a day of its release.
+# Every variant is verified before the run is reported as successful.
 
 on:
   schedule:
@@ -24,6 +25,7 @@ on:
     paths:
       - "Dockerfile"
       - "Makefile"
+      - "ci/**"
       - ".github/workflows/build.yml"
 
 permissions:
@@ -37,7 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      matrix: ${{ steps.matrix.outputs.matrix }}
+      build_matrix: ${{ steps.matrix.outputs.build_matrix }}
+      verify_matrix: ${{ steps.matrix.outputs.verify_matrix }}
     steps:
       - name: Resolve Caddy version
         id: version
@@ -55,13 +58,14 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Caddy $V"
 
-      - name: Build matrix
+      - name: Build matrices
         id: matrix
         env:
           VARIANTS: ${{ inputs.variants }}
         run: |
           python3 - <<'PY'
           import json, os
+
           defs = {
               "default": dict(
                   suffix="huaweicloud-cache-s3",
@@ -74,16 +78,33 @@ jobs:
                   with_alidns="true", with_cache="true", with_s3_storage="true",
                   with_trojan="true"),
           }
+          # Package fragments, matched against `caddy list-modules --packages`.
+          packages = {
+              "with_huaweicloud": "caddy-dns/huaweicloud",
+              "with_cloudflare": "caddy-dns/cloudflare",
+              "with_dnspod": "caddy-dns/dnspod",
+              "with_alidns": "caddy-dns/alidns",
+              "with_cache": "cache-handler",
+              "with_s3_storage": "certmagic-s3",
+              "with_trojan": "caddy-trojan",
+          }
+
           wanted = (os.environ.get("VARIANTS") or "default full").split()
-          rows = []
+          build, verify = [], []
           for name in wanted:
               if name not in defs:
                   raise SystemExit("unknown variant: " + name)
+              spec = defs[name]
+              expected = [pkg for flag, pkg in packages.items() if spec.get(flag) == "true"]
+              base = {"name": name, "suffix": spec["suffix"], "expect": " ".join(expected)}
               for target in ("binary", "runtime"):
-                  rows.append({"name": name, "target": target, **defs[name]})
+                  build.append({**base, "target": target, **spec})
+                  verify.append({**base, "target": target})
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write("matrix=" + json.dumps(rows) + "\n")
-          print(json.dumps(rows, indent=2))
+              fh.write("build_matrix=" + json.dumps(build) + "\n")
+              fh.write("verify_matrix=" + json.dumps(verify) + "\n")
+          print("build:", len(build), "verify:", len(verify))
           PY
 
   build:
@@ -91,8 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    name: ${{ matrix.name }} / ${{ matrix.target }}
+      matrix: ${{ fromJSON(needs.resolve.outputs.build_matrix) }}
+    name: build ${{ matrix.name }} / ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
 
@@ -100,18 +121,21 @@ jobs:
         id: tags
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
+          NAME: ${{ matrix.name }}
+          SUFFIX: ${{ matrix.suffix }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -eu
-          if [ "${{ matrix.target }}" = "runtime" ]; then
-            TAGS="$IMAGE:v${VERSION}-${{ matrix.suffix }}-alpine"
-            [ "${{ matrix.name }}" = "default" ] && TAGS="$TAGS $IMAGE:latest-alpine"
+          # Descriptive tag and short alias point at the same image.
+          if [ "$TARGET" = "runtime" ]; then
+            TAGS="$IMAGE:v$VERSION-$SUFFIX-alpine $IMAGE:v$VERSION-$NAME-alpine"
+            [ "$NAME" = "default" ] && TAGS="$TAGS $IMAGE:latest-alpine"
           else
-            TAGS="$IMAGE:v${VERSION}-${{ matrix.suffix }}"
-            [ "${{ matrix.name }}" = "default" ] && TAGS="$TAGS $IMAGE:latest"
+            TAGS="$IMAGE:v$VERSION-$SUFFIX $IMAGE:v$VERSION-$NAME"
+            [ "$NAME" = "default" ] && TAGS="$TAGS $IMAGE:latest"
           fi
-          FIRST="${TAGS%% *}"
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
-          echo "first=$FIRST" >> "$GITHUB_OUTPUT"
+          echo "first=${TAGS%% *}" >> "$GITHUB_OUTPUT"
           echo "tags: $TAGS"
 
       - uses: docker/login-action@v3
@@ -124,7 +148,7 @@ jobs:
         run: |
           if docker manifest inspect "${{ steps.tags.outputs.first }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.tags.outputs.first }} already published, skipping"
+            echo "${{ steps.tags.outputs.first }} already published, skipping build"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -154,3 +178,94 @@ jobs:
             WITH_TROJAN=${{ matrix.with_trojan }}
           cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.target }}
+
+  verify:
+    needs: [resolve, build]
+    if: ${{ inputs.push != false }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.verify_matrix) }}
+    name: verify ${{ matrix.name }} / ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image
+        id: img
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          if [ "${{ matrix.target }}" = "runtime" ]; then
+            REF="$IMAGE:v${VERSION}-${{ matrix.suffix }}-alpine"
+          else
+            REF="$IMAGE:v${VERSION}-${{ matrix.suffix }}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          docker pull "$REF"
+
+      - name: Version matches
+        env:
+          EXPECTED: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          if [ "${{ matrix.target }}" = "runtime" ]; then
+            OUT=$(docker run --rm --entrypoint caddy "${{ steps.img.outputs.ref }}" version)
+          else
+            OUT=$(docker run --rm --entrypoint /caddy "${{ steps.img.outputs.ref }}" version)
+          fi
+          echo "$OUT"
+          echo "$OUT" | grep -q "v${EXPECTED}" || {
+            echo "::error::caddy version is not v${EXPECTED}"; exit 1; }
+
+      - name: Expected plugins are compiled in
+        if: matrix.target == 'runtime'
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -eu
+          LIST=$(docker run --rm --entrypoint caddy "${{ steps.img.outputs.ref }}" list-modules --packages)
+          echo "$LIST" | grep -E 'caddy-dns|cache-handler|certmagic-s3|caddy-trojan' || true
+          missing=0
+          for pkg in $EXPECT; do
+            if echo "$LIST" | grep -q "$pkg"; then
+              echo "ok: $pkg"
+            else
+              echo "::error::missing plugin package: $pkg"; missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Config validates
+        if: matrix.target == 'runtime'
+        run: |
+          docker run --rm \
+            -v "$PWD/ci/smoke.Caddyfile:/etc/caddy/Caddyfile:ro" \
+            --entrypoint caddy "${{ steps.img.outputs.ref }}" \
+            validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Serves traffic
+        if: matrix.target == 'runtime'
+        run: |
+          set -eu
+          docker run -d --name smoke -p 18123:8080 \
+            -v "$PWD/ci/smoke.Caddyfile:/etc/caddy/Caddyfile:ro" \
+            "${{ steps.img.outputs.ref }}"
+          ok=0
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18123/ >/tmp/body 2>/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs smoke || true
+          docker rm -f smoke >/dev/null
+          [ "$ok" = "1" ] || { echo "::error::Caddy did not serve within 20s"; exit 1; }
+          grep -qx "caddy-ok" /tmp/body || {
+            echo "::error::unexpected response: $(cat /tmp/body)"; exit 1; }
+          echo "served: $(cat /tmp/body)"
+
+      - name: Runs as non-root
+        if: matrix.target == 'runtime'
+        run: |
+          OUT=$(docker run --rm --entrypoint id "${{ steps.img.outputs.ref }}")
+          echo "$OUT"
+          echo "$OUT" | grep -q 'uid=1000' || { echo "::error::not running as uid 1000"; exit 1; }
