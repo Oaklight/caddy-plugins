@@ -140,6 +140,10 @@ def http(method, url, payload=None, token=None):
         return exc.code, exc.read().decode("utf-8", "replace")
 
 
+if not USER or not TOKEN:
+    print("::warning::DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are not set; description sync skipped")
+    sys.exit(0)
+
 status, out = http("POST", BASE + "/users/login/", {"username": USER, "password": TOKEN})
 if status != 200 or "token" not in out:
     sys.exit("::error::Docker Hub login failed (%s): %s" % (status, str(out)[:300]))
