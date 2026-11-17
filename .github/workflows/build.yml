@@ -102,8 +102,8 @@ jobs:
                   verify.append({**base, "target": target})
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write("build_matrix=" + json.dumps(build) + "\n")
-              fh.write("verify_matrix=" + json.dumps(verify) + "\n")
+              fh.write("build_matrix=" + json.dumps({"include": build}) + "\n")
+              fh.write("verify_matrix=" + json.dumps({"include": verify}) + "\n")
           print("build:", len(build), "verify:", len(verify))
           PY
 
