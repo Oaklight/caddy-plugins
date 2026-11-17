@@ -142,8 +142,13 @@ jobs:
             TAGS="$IMAGE:v$VERSION-$SUFFIX $IMAGE:v$VERSION-$NAME"
             [ "$NAME" = "default" ] && [ "$UPDATE_LATEST" = "true" ] && TAGS="$TAGS $IMAGE:latest"
           fi
-          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
-          echo "first=${TAGS%% *}" >> "$GITHUB_OUTPUT"
+          FIRST="${TAGS%% *}"
+          {
+            echo "tags<<TAGS_EOF"
+            for t in $TAGS; do echo "$t"; done
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "first=$FIRST" >> "$GITHUB_OUTPUT"
           echo "tags: $TAGS"
 
       - name: Login to Docker Hub
