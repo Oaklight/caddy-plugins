@@ -116,6 +116,7 @@ jobs:
     name: build ${{ matrix.name }} / ${{ matrix.target }}
     env:
       HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      PUSH_IMAGES: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
     steps:
       - uses: actions/checkout@v4
 
@@ -175,7 +176,7 @@ jobs:
           context: .
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.push != false }}
+          push: ${{ env.PUSH_IMAGES }}
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             CADDY_VERSION=${{ needs.resolve.outputs.version }}
@@ -191,7 +192,7 @@ jobs:
 
   verify:
     needs: [resolve, build]
-    if: ${{ inputs.push != false }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,6 +200,7 @@ jobs:
     name: verify ${{ matrix.name }} / ${{ matrix.target }}
     env:
       HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      PUSH_IMAGES: ${{ github.event_name != 'workflow_dispatch' || inputs.push }}
     steps:
       - uses: actions/checkout@v4
 
