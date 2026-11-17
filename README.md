@@ -30,7 +30,9 @@ Each tag exists twice: the binary image uses the tag as listed, the runtime
 image appends `-alpine`. The descriptive tag and the short alias point at the
 same image, so both naming schemes stay valid.
 
-The `default` variant also updates `latest` and `latest-alpine`.
+`latest` and `latest-alpine` are only moved when a manual run passes
+`update_latest: true`, so a scheduled build cannot silently change what
+`latest` points at.
 
 Both variants are multi-arch: `linux/amd64` and `linux/arm64`.
 
@@ -116,6 +118,7 @@ Manual run with a pinned version and no push:
 
 ```bash
 gh workflow run build.yml -f caddy_version=2.11.9 -f push=false
+gh workflow run build.yml -f caddy_version=2.11.9 -f update_latest=true
 ```
 
 Required repository secrets: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.

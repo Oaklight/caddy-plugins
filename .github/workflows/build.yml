@@ -20,6 +20,10 @@ on:
         description: "Push images to Docker Hub"
         type: boolean
         default: true
+      update_latest:
+        description: "Also move latest and latest-alpine to this build"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -127,15 +131,16 @@ jobs:
           NAME: ${{ matrix.name }}
           SUFFIX: ${{ matrix.suffix }}
           TARGET: ${{ matrix.target }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
         run: |
           set -eu
           # Descriptive tag and short alias point at the same image.
           if [ "$TARGET" = "runtime" ]; then
             TAGS="$IMAGE:v$VERSION-$SUFFIX-alpine $IMAGE:v$VERSION-$NAME-alpine"
-            [ "$NAME" = "default" ] && TAGS="$TAGS $IMAGE:latest-alpine"
+            [ "$NAME" = "default" ] && [ "$UPDATE_LATEST" = "true" ] && TAGS="$TAGS $IMAGE:latest-alpine"
           else
             TAGS="$IMAGE:v$VERSION-$SUFFIX $IMAGE:v$VERSION-$NAME"
-            [ "$NAME" = "default" ] && TAGS="$TAGS $IMAGE:latest"
+            [ "$NAME" = "default" ] && [ "$UPDATE_LATEST" = "true" ] && TAGS="$TAGS $IMAGE:latest"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
           echo "first=${TAGS%% *}" >> "$GITHUB_OUTPUT"
